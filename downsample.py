@@ -23,6 +23,21 @@ def load_sample(X_file, Y_file):
 
 def remove_outliers(X, Y):
     """Removes class outliers from the point cloud"""
+    new_cloud = np.empty([0,3])
+    new_labels = []
+
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(X)
+
+    for label, class_cloud in enumerate([pcd.select_down_sample(list(np.where(Y==label)[0])) for label in range(0,5)]):
+        new_class_cloud = np.asarray(class_cloud.remove_radius_outlier(nb_points=20, radius=11)[0].points)
+        
+        new_cloud = np.concatenate((new_cloud, new_class_cloud))
+        new_labels.extend([label] * new_class_cloud.shape[0])
+
+    X = new_cloud
+    Y = np.array(new_labels)
+    assert X.shape[0] == Y.shape[0]
     return X, Y
 
 
