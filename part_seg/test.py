@@ -11,7 +11,7 @@ import provider
 import pointnet_part_seg as model
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--model_path', default='train_results/trained_models/epoch_190.ckpt', help='Model checkpoint path')
+parser.add_argument('--model_path', default='train_results/trained_models/epoch_200.ckpt', help='Model checkpoint path')
 FLAGS = parser.parse_args()
 
 
@@ -27,7 +27,7 @@ output_verbose = True   # If true, output all color-coded part segmentation obj 
 point_num = 3000            # the max number of points in the all testing data shapes
 batch_size = 1
 
-test_file_list = os.path.join(BASE_DIR, 'testing_ply_file_list.txt')
+test_file_list = os.path.join(hdf5_data_dir, 'test_hdf5_file_list.txt')
 
 oid2cpid = json.load(open(os.path.join(hdf5_data_dir, 'overallid_to_catid_partid.json'), 'r'))
 
@@ -50,7 +50,7 @@ color_map_file = os.path.join(hdf5_data_dir, 'part_color_mapping.json')
 color_map = json.load(open(color_map_file, 'r'))
 
 NUM_OBJ_CATS = 16
-NUM_PART_CATS = 50
+NUM_PART_CATS = 5
 
 cpid2oid = json.load(open(os.path.join(hdf5_data_dir, 'catid_partid_to_overallid.json'), 'r'))
 
@@ -169,26 +169,27 @@ def predict():
         total_per_cat_seen = np.zeros((NUM_OBJ_CATS)).astype(np.int32)
 
         ffiles = open(test_file_list, 'r')
-        lines = [line.rstrip() for line in ffiles.readlines()]
-        pts_files = [line.split()[0] for line in lines]
-        seg_files = [line.split()[1] for line in lines]
-        labels = [line.split()[2] for line in lines]
+        files = [line.rstrip() for line in ffiles.readlines()]
         ffiles.close()
 
-        len_pts_files = len(pts_files)
-        for shape_idx in range(len_pts_files):
-            if shape_idx % 100 == 0:
-                printout(flog, '%d/%d ...' % (shape_idx, len_pts_files))
+        len_pts_files = len(files)
+        data, labels, segs = provider.load_h5_data_label_seg(
+            os.path.join(hdf5_data_dir, files[0]))
 
-            cur_gt_label = on2oid[labels[shape_idx]]
+        for i in range(len(data)):
+            if i % 100 == 0:
+                printout(flog, '%d/%d ...' % (i, len(data)))
+
+            cur_gt_label = labels[i]
 
             cur_label_one_hot = np.zeros((1, NUM_OBJ_CATS), dtype=np.float32)
             cur_label_one_hot[0, cur_gt_label] = 1
 
-            pts_file_to_load = os.path.join(ply_data_dir, pts_files[shape_idx])
-            seg_file_to_load = os.path.join(ply_data_dir, seg_files[shape_idx])
+            # pts_file_to_load = os.path.join(ply_data_dir, pts_files[shape_idx])
+            # seg_file_to_load = os.path.join(ply_data_dir, seg_files[shape_idx])
 
-            pts, seg = load_pts_seg_files(pts_file_to_load, seg_file_to_load, objcats[cur_gt_label])
+            pts = data[i]
+            seg = segs[i]
             ori_point_num = len(seg)
 
             batch_data[0, ...] = pc_augment_to_point_num(pc_normalize(pts), point_num)
@@ -241,12 +242,12 @@ def predict():
             total_per_cat_iou[cur_gt_label] += avg_iou
             
             if output_verbose:
-                output_color_point_cloud(pts, seg, os.path.join(output_dir, str(shape_idx)+'_gt.obj'))
-                output_color_point_cloud(pts, seg_pred_val, os.path.join(output_dir, str(shape_idx)+'_pred.obj'))
+                output_color_point_cloud(pts, seg, os.path.join(output_dir, str(i)+'_gt.obj'))
+                output_color_point_cloud(pts, seg_pred_val, os.path.join(output_dir, str(i)+'_pred.obj'))
                 output_color_point_cloud_red_blue(pts, np.int32(seg == seg_pred_val), 
-                        os.path.join(output_dir, str(shape_idx)+'_diff.obj'))
+                        os.path.join(output_dir, str(i)+'_diff.obj'))
 
-                with open(os.path.join(output_dir, str(shape_idx)+'.log'), 'w') as fout:
+                with open(os.path.join(output_dir, str(i)+'.log'), 'w') as fout:
                     fout.write('Total Point: %d\n\n' % ori_point_num)
                     fout.write('Ground Truth: %s\n' % objnames[cur_gt_label])
                     fout.write('Predict: %s\n\n' % objnames[label_pred_val])

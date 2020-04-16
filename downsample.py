@@ -182,6 +182,10 @@ with open(os.path.join(output_folder, 'part_color_mapping.json'), "w") as f:
     ]
     json.dump(colors, f)
 
+with open(os.path.join(output_folder, 'catid_partid_to_overallid.json'), "w") as f:
+    d = {'0': 0}
+    json.dump(d, f)
+
 with open(os.path.join(output_folder, 'all_object_categories.txt'), "w") as f:
     # We only have faces
     f.write("face\t0\n")
