@@ -1,4 +1,5 @@
 import argparse
+from random import shuffle
 import os
 import json
 from sklearn.model_selection import train_test_split
@@ -23,15 +24,16 @@ def load_sample(X_file, Y_file):
 
 def remove_outliers(X, Y):
     """Removes class outliers from the point cloud"""
-    new_cloud = np.empty([0,3])
+    new_cloud = np.empty([0, 3])
     new_labels = []
 
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(X)
 
-    for label, class_cloud in enumerate([pcd.select_down_sample(list(np.where(Y==label)[0])) for label in range(0,5)]):
+    for label, class_cloud in enumerate(
+            [pcd.select_down_sample(list(np.where(Y == label)[0])) for label in range(0, 5)]):
         new_class_cloud = np.asarray(class_cloud.remove_radius_outlier(nb_points=20, radius=11)[0].points)
-        
+
         new_cloud = np.concatenate((new_cloud, new_class_cloud))
         new_labels.extend([label] * new_class_cloud.shape[0])
 
@@ -55,36 +57,89 @@ def random_downsample(X, Y, target_number=2048):
     return rand.fit_resample(X, Y)
 
 
+def shuffle_sample(X, Y):
+    """Shuffles X and Y"""
+    assert X.shape[0] == Y.shape[0]
+
+    arr = list(range(X.shape[0]))
+    shuffle(arr)
+
+    return X[arr], Y[arr]
+
+
+def partition_sample(X, Y, target_number=2048):
+    """Take one N pts sample and return M T points samples"""
+
+    classes, counts = np.unique(Y, return_counts=True)
+    N_classes = classes.shape[0]
+    N_per_class = target_number // N_classes
+    N_iter = np.min(counts) // N_per_class
+
+    print(f">> n_classes = {N_classes}, n/cls = {N_per_class}, iter = {N_iter}")
+
+    X, Y = shuffle_sample(X, Y)
+    sample_partition = {cls: X[Y == cls] for cls in classes}
+    seg_partition = {cls: Y[Y == cls] for cls in classes}
+    X_new, Y_new = [], []
+    for i in range(N_iter):
+        first_class = classes[0]
+        first_number = N_per_class + target_number - N_per_class * N_classes
+        x = sample_partition[first_class][i * first_number:(i+1) * first_number]
+        y = seg_partition[first_class][i * first_number:(i+1) * first_number]
+        for cls in classes[1:]:
+            x = np.concatenate((x, sample_partition[cls][i * N_per_class:(i + 1) * N_per_class]))
+            y = np.concatenate((y, seg_partition[cls][i * N_per_class:(i + 1) * N_per_class]))
+        X_new.append(x)
+        Y_new.append(y)
+
+    X_new = np.array(X_new)
+    Y_new = np.array(Y_new)
+
+    return X_new, Y_new
+
+
 def normalize_values(X):
     """Maps the values of X between -1.0 and 1.0"""
     min_max_scaler = MinMaxScaler(feature_range=(-1.0, 1.0))
     return min_max_scaler.fit_transform(X)
 
 
-def save_files_to_h5(X, Y, input_folder, output_file, target_number=2048):
+def save_files_to_h5(X, Y, input_folder, output_file_format, target_number=2048, use_partitioning=False):
     """Take a series of sample files
     and turns it into a h5 file"""
-    store = h5py.File(output_file, "w")
     samples = []
     pids = []
 
-    # There is only one class (Face)
-    labels = np.zeros(X.shape[0])
     for x, y, in tqdm(zip(X, Y)):
         data, seg = load_sample(os.path.join(input_folder, x), os.path.join(input_folder, y))
         # Step 1: remove outliers
         data, seg = remove_outliers(data, seg)
-        # Step 2: down-sample to target_number points
-        data, seg = random_downsample(data, seg, target_number)
-        # Step 3: normalize between -1.0 and 1.0
+        # Step 2: normalize between -1.0 and 1.0
         data = normalize_values(data)
+        # Step 3: down-sample to target_number points
+        if not use_partitioning:
+            data, seg = random_downsample(data, seg, target_number)
 
-        assert data.shape[0] == target_number
-        assert seg.shape[0] == target_number
+            assert data.shape[0] == target_number
+            assert seg.shape[0] == target_number
 
-        samples.append(data)
-        pids.append(seg)
+            samples.append(data)
+            pids.append(seg)
+        else:
+            partitions, segs = partition_sample(data, seg, target_number=target_number)
 
+            print(x)
+            print(partitions.shape)
+            assert partitions.shape[1] == target_number
+            assert segs.shape[1] == target_number
+
+            samples.extend(partitions)
+            pids.extend(segs)
+
+    # There is only one class (Face)
+    labels = np.zeros(len(samples))
+
+    store = h5py.File(output_file_format.format("0"), "w")
     store.create_dataset(
         'data', data=samples,
         dtype='float32', compression='gzip', compression_opts=4
@@ -110,6 +165,8 @@ parser.add_argument('--shuffle', type=bool, default=True,
                     help='Whether or not to shuffle the dataset when splitting [default: true]')
 parser.add_argument('--num_points', type=int, default=2048,
                     help='The number of points to down-sample to [default: 2048]')
+parser.add_argument('--use_partitioning', type=bool, default=False,
+                    help='Whether or not use partitioning to down-sample samples [default: false]')
 FLAGS = parser.parse_args()
 
 input_folder = FLAGS.input
@@ -117,6 +174,7 @@ output_folder = FLAGS.output
 split_ratio = FLAGS.train_test_ratio
 shuffle_dataset = FLAGS.shuffle
 target_number = FLAGS.num_points
+use_partitioning = FLAGS.use_partitioning
 
 files = os.listdir(input_folder)
 sfiles = np.sort([f for f in files if f.endswith('.pts')])
@@ -137,11 +195,14 @@ if not os.path.exists(output_folder):
     os.makedirs(output_folder)
 
 save_files_to_h5(X_train, Y_train,
-                 input_folder, os.path.join(output_folder, 'ply_data_train0.h5'), target_number=target_number)
+                 input_folder, os.path.join(output_folder, 'ply_data_train{}.h5'), target_number=target_number,
+                 use_partitioning=use_partitioning)
 save_files_to_h5(X_test, Y_test,
-                 input_folder, os.path.join(output_folder, 'ply_data_test0.h5'), target_number=target_number)
+                 input_folder, os.path.join(output_folder, 'ply_data_test{}.h5'), target_number=target_number,
+                 use_partitioning=use_partitioning)
 save_files_to_h5(X_val, Y_val,
-                 input_folder, os.path.join(output_folder, 'ply_data_val0.h5'), target_number=target_number)
+                 input_folder, os.path.join(output_folder, 'ply_data_val{}.h5'), target_number=target_number,
+                 use_partitioning=use_partitioning)
 
 with open(os.path.join(output_folder, "train_hdf5_file_list.txt"), "w") as f:
     f.write('ply_data_train0.h5\n')
