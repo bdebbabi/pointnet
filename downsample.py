@@ -56,6 +56,18 @@ def random_downsample(X, Y, target_number=2048):
 
     return rand.fit_resample(X, Y)
 
+def get_normal(X, X_processed):
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(X)
+    pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=10, max_nn=30))
+    normals = np.asarray(pcd.normals)
+
+    indexes = [np.where((X==x).all(axis=1))[0][0] for x in X_processed]
+    indexes = np.ix_(indexes, [0,1,2])
+
+    normals = normals[indexes]
+
+    return normals
 
 def shuffle_sample(X, Y):
     """Shuffles X and Y"""
@@ -109,21 +121,27 @@ def save_files_to_h5(X, Y, input_folder, output_file_format, target_number=2048,
     and turns it into a h5 file"""
     samples = []
     pids = []
-
+    normals = []
     for x, y, in tqdm(zip(X, Y)):
-        data, seg = load_sample(os.path.join(input_folder, x), os.path.join(input_folder, y))
+        original_data, seg = load_sample(os.path.join(input_folder, x), os.path.join(input_folder, y))
         # Step 1: remove outliers
-        data, seg = remove_outliers(data, seg)
-        # Step 2: normalize between -1.0 and 1.0
-        data = normalize_values(data)
-        # Step 3: down-sample to target_number points
+        data, seg = remove_outliers(original_data, seg)
+        
+        # Step 2: down-sample to target_number points
         if not use_partitioning:
             data, seg = random_downsample(data, seg, target_number)
 
             assert data.shape[0] == target_number
             assert seg.shape[0] == target_number
+    
+            # Step 3: get normals
+            normal = get_normal(original_data, data)
 
+            # Step 4: normalize between -1.0 and 1.0
+            data = normalize_values(data)
+            
             samples.append(data)
+            normals.append(normal)
             pids.append(seg)
         else:
             partitions, segs = partition_sample(data, seg, target_number=target_number)
@@ -133,7 +151,15 @@ def save_files_to_h5(X, Y, input_folder, output_file_format, target_number=2048,
             assert partitions.shape[1] == target_number
             assert segs.shape[1] == target_number
 
-            samples.extend(partitions)
+            for partition in partitions:
+                # Step 3: get normals
+                normal = get_normal(original_data, partition) 
+                normals.append(normal)
+                
+                # Step 4: normalize between -1.0 and 1.0
+                partition = normalize_values(partition)
+                samples.append(partition)
+
             pids.extend(segs)
 
     # There is only one class (Face)
@@ -142,6 +168,10 @@ def save_files_to_h5(X, Y, input_folder, output_file_format, target_number=2048,
     store = h5py.File(output_file_format.format("0"), "w")
     store.create_dataset(
         'data', data=samples,
+        dtype='float32', compression='gzip', compression_opts=4
+    )
+    store.create_dataset(
+        'normal', data=normals,
         dtype='float32', compression='gzip', compression_opts=4
     )
     store.create_dataset(
