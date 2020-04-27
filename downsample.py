@@ -43,12 +43,16 @@ def remove_outliers(X, Y):
     return X, Y
 
 
-def random_downsample(X, Y, target_number=2048):
+def random_downsample(X, Y, target_number=2048, keep_initial_density=False):
     """Performs a random down-sampling on the dataset"""
     classes, counts = np.unique(Y, return_counts=True)
     N_class = classes.shape[0]
 
-    strategy = {cls: min(target_number // N_class, count) for cls, count in zip(classes, counts)}
+    if keep_initial_density:
+        total = Y.shape[0]
+        strategy = {cls: int(count / total * target_number) for cls, count in zip(classes, counts)}
+    else:
+        strategy = {cls: min(target_number // N_class, count) for cls, count in zip(classes, counts)}
     # Pad using the class 0
     strategy[0] += target_number - np.sum(list(strategy.values()))
 
@@ -56,18 +60,20 @@ def random_downsample(X, Y, target_number=2048):
 
     return rand.fit_resample(X, Y)
 
+
 def get_normal(X, X_processed):
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(X)
     pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=10, max_nn=30))
     normals = np.asarray(pcd.normals)
 
-    indexes = [np.where((X==x).all(axis=1))[0][0] for x in X_processed]
-    indexes = np.ix_(indexes, [0,1,2])
+    indexes = [np.where((X == x).all(axis=1))[0][0] for x in X_processed]
+    indexes = np.ix_(indexes, [0, 1, 2])
 
     normals = normals[indexes]
 
     return normals
+
 
 def shuffle_sample(X, Y):
     """Shuffles X and Y"""
@@ -96,8 +102,8 @@ def partition_sample(X, Y, target_number=2048):
     for i in range(N_iter):
         first_class = classes[0]
         first_number = N_per_class + target_number - N_per_class * N_classes
-        x = sample_partition[first_class][i * first_number:(i+1) * first_number]
-        y = seg_partition[first_class][i * first_number:(i+1) * first_number]
+        x = sample_partition[first_class][i * first_number:(i + 1) * first_number]
+        y = seg_partition[first_class][i * first_number:(i + 1) * first_number]
         for cls in classes[1:]:
             x = np.concatenate((x, sample_partition[cls][i * N_per_class:(i + 1) * N_per_class]))
             y = np.concatenate((y, seg_partition[cls][i * N_per_class:(i + 1) * N_per_class]))
@@ -116,7 +122,8 @@ def normalize_values(X):
     return min_max_scaler.fit_transform(X)
 
 
-def save_files_to_h5(X, Y, input_folder, output_file_format, target_number=2048, use_partitioning=False):
+def save_files_to_h5(X, Y, input_folder, output_file_format, target_number=2048, use_partitioning=False,
+                     keep_initial_density=False, compute_normals=True):
     """Take a series of sample files
     and turns it into a h5 file"""
     samples = []
@@ -126,36 +133,37 @@ def save_files_to_h5(X, Y, input_folder, output_file_format, target_number=2048,
         original_data, seg = load_sample(os.path.join(input_folder, x), os.path.join(input_folder, y))
         # Step 1: remove outliers
         data, seg = remove_outliers(original_data, seg)
-        
+
         # Step 2: down-sample to target_number points
         if not use_partitioning:
-            data, seg = random_downsample(data, seg, target_number)
+            data, seg = random_downsample(data, seg, target_number=target_number,
+                                          keep_initial_density=keep_initial_density)
 
             assert data.shape[0] == target_number
             assert seg.shape[0] == target_number
-    
+
             # Step 3: get normals
-            normal = get_normal(original_data, data)
+            if compute_normals:
+                normal = get_normal(original_data, data)
+                normals.append(normal)
 
             # Step 4: normalize between -1.0 and 1.0
             data = normalize_values(data)
-            
+
             samples.append(data)
-            normals.append(normal)
             pids.append(seg)
         else:
             partitions, segs = partition_sample(data, seg, target_number=target_number)
 
-            print(x)
-            print(partitions.shape)
             assert partitions.shape[1] == target_number
             assert segs.shape[1] == target_number
 
             for partition in partitions:
                 # Step 3: get normals
-                normal = get_normal(original_data, partition) 
-                normals.append(normal)
-                
+                if compute_normals:
+                    normal = get_normal(original_data, partition)
+                    normals.append(normal)
+
                 # Step 4: normalize between -1.0 and 1.0
                 partition = normalize_values(partition)
                 samples.append(partition)
@@ -170,10 +178,11 @@ def save_files_to_h5(X, Y, input_folder, output_file_format, target_number=2048,
         'data', data=samples,
         dtype='float32', compression='gzip', compression_opts=4
     )
-    store.create_dataset(
-        'normal', data=normals,
-        dtype='float32', compression='gzip', compression_opts=4
-    )
+    if compute_normals:
+        store.create_dataset(
+            'normal', data=normals,
+            dtype='float32', compression='gzip', compression_opts=4
+        )
     store.create_dataset(
         'label', data=labels,
         dtype='uint8', compression='gzip', compression_opts=1
@@ -197,6 +206,10 @@ parser.add_argument('--num_points', type=int, default=2048,
                     help='The number of points to down-sample to [default: 2048]')
 parser.add_argument('--use_partitioning', type=bool, default=False,
                     help='Whether or not use partitioning to down-sample samples [default: false]')
+parser.add_argument('--keep_initial_density', type=bool, default=False,
+                    help='Whether or not to down-sample using the same number of points for each classes [default: false]')
+parser.add_argument('--compute_normals', type=bool, default=True,
+                    help='Whether or not to compute the normals for the given dataset [default: true]')
 FLAGS = parser.parse_args()
 
 input_folder = FLAGS.input
@@ -205,6 +218,8 @@ split_ratio = FLAGS.train_test_ratio
 shuffle_dataset = FLAGS.shuffle
 target_number = FLAGS.num_points
 use_partitioning = FLAGS.use_partitioning
+keep_initial_density = FLAGS.keep_initial_density
+compute_normals = FLAGS.compute_normals
 
 files = os.listdir(input_folder)
 sfiles = np.sort([f for f in files if f.endswith('.pts')])
@@ -226,13 +241,16 @@ if not os.path.exists(output_folder):
 
 save_files_to_h5(X_train, Y_train,
                  input_folder, os.path.join(output_folder, 'ply_data_train{}.h5'), target_number=target_number,
-                 use_partitioning=use_partitioning)
+                 use_partitioning=use_partitioning,
+                 keep_initial_density=keep_initial_density, compute_normals=compute_normals)
 save_files_to_h5(X_test, Y_test,
                  input_folder, os.path.join(output_folder, 'ply_data_test{}.h5'), target_number=target_number,
-                 use_partitioning=use_partitioning)
+                 use_partitioning=use_partitioning,
+                 keep_initial_density=keep_initial_density, compute_normals=compute_normals)
 save_files_to_h5(X_val, Y_val,
                  input_folder, os.path.join(output_folder, 'ply_data_val{}.h5'), target_number=target_number,
-                 use_partitioning=use_partitioning)
+                 use_partitioning=use_partitioning,
+                 keep_initial_density=keep_initial_density, compute_normals=compute_normals)
 
 with open(os.path.join(output_folder, "train_hdf5_file_list.txt"), "w") as f:
     f.write('ply_data_train0.h5\n')
