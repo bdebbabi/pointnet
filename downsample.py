@@ -10,7 +10,7 @@ from imblearn.under_sampling import RandomUnderSampler
 import open3d as o3d
 import h5py
 import pandas as pd
-
+from sklearn.model_selection import KFold
 
 def load_sample(X_file, Y_file):
     """Load one sample from the .pts and the .seg files"""
@@ -122,10 +122,12 @@ def normalize_values(X):
     return min_max_scaler.fit_transform(X)
 
 
-def save_files_to_h5(X, Y, input_folder, output_file_format, target_number=2048, use_partitioning=False,
+def generate_data(X, Y, input_folder, target_number=2048, use_partitioning=False,
                      keep_initial_density=False, compute_normals=True):
     """Take a series of sample files
-    and turns it into a h5 file"""
+    and returns data """
+    print(f">> Generating data")
+
     samples = []
     pids = []
     normals = []
@@ -173,14 +175,19 @@ def save_files_to_h5(X, Y, input_folder, output_file_format, target_number=2048,
     # There is only one class (Face)
     labels = np.zeros(len(samples))
 
-    store = h5py.File(output_file_format.format("0"), "w")
+    return np.array(samples), np.array(normals), labels, np.array(pids)
+
+def save_files_to_h5(X, Y, N,  labels, output_file):
+    """Turns data into an h5 file"""
+
+    store = h5py.File(output_file, "w")
     store.create_dataset(
-        'data', data=samples,
+        'data', data=X,
         dtype='float32', compression='gzip', compression_opts=4
     )
     if compute_normals:
         store.create_dataset(
-            'normal', data=normals,
+            'normal', data=N,
             dtype='float32', compression='gzip', compression_opts=4
         )
     store.create_dataset(
@@ -188,7 +195,7 @@ def save_files_to_h5(X, Y, input_folder, output_file_format, target_number=2048,
         dtype='uint8', compression='gzip', compression_opts=1
     )
     store.create_dataset(
-        'pid', data=pids,
+        'pid', data=Y,
         dtype='uint8', compression='gzip', compression_opts=1
     )
 
@@ -199,7 +206,7 @@ parser.add_argument('--input', type=str, default='./HeadPointsAndLabels',
                     help='Path to the dataset [default: ./HeadPointsAndLabels]')
 parser.add_argument('--output', type=str, default='./DownSampledDataset',
                     help='Path the down-sampled dataset [default: ./part_seg/hdf5_data]')
-parser.add_argument('--train_test_ratio', type=float, default=0.4, help='Train/test ratio [default: 0.4]')
+parser.add_argument('--test_size', type=float, default=0.2, help='Train/test ratio [default: 0.2]')
 parser.add_argument('--shuffle', type=bool, default=True,
                     help='Whether or not to shuffle the dataset when splitting [default: true]')
 parser.add_argument('--num_points', type=int, default=2048,
@@ -210,56 +217,90 @@ parser.add_argument('--keep_initial_density', type=bool, default=False,
                     help='Whether or not to down-sample using the same number of points for each classes [default: false]')
 parser.add_argument('--compute_normals', type=bool, default=True,
                     help='Whether or not to compute the normals for the given dataset [default: true]')
+parser.add_argument('--cross_validation', type=bool, default=False,
+                    help='Whether or not to perform cross validation [default: false]')                    
 FLAGS = parser.parse_args()
 
 input_folder = FLAGS.input
 output_folder = FLAGS.output
-split_ratio = FLAGS.train_test_ratio
+test_size = FLAGS.test_size
 shuffle_dataset = FLAGS.shuffle
 target_number = FLAGS.num_points
 use_partitioning = FLAGS.use_partitioning
 keep_initial_density = FLAGS.keep_initial_density
 compute_normals = FLAGS.compute_normals
+cross_validation = FLAGS.cross_validation
 
 files = os.listdir(input_folder)
 sfiles = np.sort([f for f in files if f.endswith('.pts')])
 segfiles = np.sort([f for f in files if f.endswith('.seg')])
 
-data = [(sfiles[i], segfiles[i]) for i in range(len(sfiles))]
+# data = [(sfiles[i], segfiles[i]) for i in range(len(sfiles))]
 
 print(f">> Found {len(sfiles)} samples in {input_folder}")
-print(f">> Splitting train/test with ratio {100 * split_ratio}%")
-
-X_train, X_test, Y_train, Y_test = train_test_split(sfiles, segfiles, shuffle=shuffle_dataset, test_size=split_ratio)
-X_test, X_val, Y_test, Y_val = train_test_split(X_test, Y_test, test_size=0.5)
-
-print(f">> Got {X_train.shape[0]} samples for training, {X_test.shape[0]} for testing, {X_val.shape[0]} for validation")
 
 if not os.path.exists(output_folder):
     print(f">> Creating folder {output_folder}")
     os.makedirs(output_folder)
 
-save_files_to_h5(X_train, Y_train,
-                 input_folder, os.path.join(output_folder, 'ply_data_train{}.h5'), target_number=target_number,
-                 use_partitioning=use_partitioning,
-                 keep_initial_density=keep_initial_density, compute_normals=compute_normals)
-save_files_to_h5(X_test, Y_test,
-                 input_folder, os.path.join(output_folder, 'ply_data_test{}.h5'), target_number=target_number,
-                 use_partitioning=use_partitioning,
-                 keep_initial_density=keep_initial_density, compute_normals=compute_normals)
-save_files_to_h5(X_val, Y_val,
-                 input_folder, os.path.join(output_folder, 'ply_data_val{}.h5'), target_number=target_number,
-                 use_partitioning=use_partitioning,
-                 keep_initial_density=keep_initial_density, compute_normals=compute_normals)
+samples, normals, labels, pids = generate_data(sfiles, segfiles, input_folder, target_number=target_number,
+                    use_partitioning=use_partitioning,
+                    keep_initial_density=keep_initial_density, compute_normals=compute_normals)
 
-with open(os.path.join(output_folder, "train_hdf5_file_list.txt"), "w") as f:
-    f.write('ply_data_train0.h5\n')
+if cross_validation:
+    n_splits = 4
+    print(f">> Performing cross validation with {n_splits} splits")
 
-with open(os.path.join(output_folder, "test_hdf5_file_list.txt"), "w") as f:
-    f.write('ply_data_test0.h5\n')
+    X_train, X_test, Y_train, Y_test, N_train, N_test = train_test_split(samples, pids, normals, shuffle=shuffle_dataset, test_size=test_size)
+    kf = KFold(n_splits=n_splits)
+    for index, split in enumerate(tqdm(kf.split(X_train))):
+        print(f">> Split {index+1}")
 
-with open(os.path.join(output_folder, "val_hdf5_file_list.txt"), "w") as f:
-    f.write('ply_data_val0.h5\n')
+        train_index, val_index = split[0], split[1]
+
+        x_train, x_val = X_train[train_index], X_train[val_index]
+        y_train, y_val = Y_train[train_index], Y_train[val_index]
+        n_train, n_val = N_train[train_index], N_train[val_index]
+        
+        print(f">> Got {x_train.shape[0]} samples for training, {X_test.shape[0]} for testing, {x_val.shape[0]} for validation")
+
+        save_files_to_h5(x_train, y_train, n_train, labels, os.path.join(output_folder, f'ply_data_train{index}.h5'))
+        save_files_to_h5(x_val, y_val, n_val, labels, os.path.join(output_folder, f'ply_data_val{index}.h5'))
+    
+    save_files_to_h5(X_test, Y_test, N_test, labels, os.path.join(output_folder, f'ply_data_test0.h5'))
+    
+
+    with open(os.path.join(output_folder, "train_hdf5_file_list.txt"), "w") as f:
+        [f.write(f'ply_data_train{i}.h5\n') for i in range(5)]
+
+    with open(os.path.join(output_folder, "val_hdf5_file_list.txt"), "w") as f:
+        [f.write(f'ply_data_val{i}.h5\n') for i in range(5)]
+
+    with open(os.path.join(output_folder, "test_hdf5_file_list.txt"), "w") as f:
+        f.write('ply_data_test0.h5\n')
+
+else:
+    print(f">> Splitting train/test with ratio {100 * test_size}% for test dataset")
+
+    X_train, X_test, Y_train, Y_test, N_train, N_test = train_test_split(samples, pids, normals, shuffle=shuffle_dataset, test_size=test_size)
+    X_train, X_val, Y_train, Y_val, N_train, N_val = train_test_split(X_train, Y_train, N_train, test_size=0.25) #0.25 * 0.8 = 0.2
+
+    print(f">> Got {X_train.shape[0]} samples for training, {X_test.shape[0]} for testing, {X_val.shape[0]} for validation")
+
+
+    save_files_to_h5(X_train, Y_train, N_train, labels, os.path.join(output_folder, f'ply_data_train0.h5'))
+    save_files_to_h5(X_test, Y_test, N_test, labels, os.path.join(output_folder, f'ply_data_test0.h5'))
+    save_files_to_h5(X_val, Y_val, N_val, labels, os.path.join(output_folder, f'ply_data_val0.h5'))
+
+
+    with open(os.path.join(output_folder, "train_hdf5_file_list.txt"), "w") as f:
+        f.write('ply_data_train0.h5\n')
+
+    with open(os.path.join(output_folder, "test_hdf5_file_list.txt"), "w") as f:
+        f.write('ply_data_test0.h5\n')
+
+    with open(os.path.join(output_folder, "val_hdf5_file_list.txt"), "w") as f:
+        f.write('ply_data_val0.h5\n')
 
 with open(os.path.join(output_folder, 'part_color_mapping.json'), "w") as f:
     colors = [
