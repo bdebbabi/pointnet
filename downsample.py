@@ -266,7 +266,6 @@ if not os.path.exists(output_folder):
     print(f">> Creating folder {output_folder}")
     os.makedirs(output_folder)
 
-print(f'Compute normals 1: {compute_normals}, only ff : {only_front_face}')
 samples, normals, labels, pids = generate_data(sfiles, segfiles, input_folder, target_number=target_number,
                                                use_partitioning=use_partitioning, keep_initial_density=keep_initial_density,
                                                compute_normals=compute_normals, only_front_face=only_front_face)
